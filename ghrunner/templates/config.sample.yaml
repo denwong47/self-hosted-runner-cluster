@@ -1,0 +1,29 @@
+# Copy to ~/.config/ghrunner/ghrunner.yaml (or run `ghrunner init`) and fill in.
+
+github_app:
+  app_id: "123456"
+  client_id: "Iv1.abc123"               # kept for completeness; not required for registration tokens
+  client_secret_ssm_param: "/ghrunner/github-app/client-secret"   # SecureString in AWS SSM
+  private_key_s3:
+    bucket: "my-org-secrets"
+    key: "github-app/ghrunner.pem"
+  aws_region: "us-east-1"
+
+repo: "my-org/my-repo"
+
+fleet:
+  count: 5
+  name_prefix: "runner"
+  labels: [self-hosted, linux, arm64]
+  work_dir: "_work"
+  ephemeral: false
+  disable_auto_update: false
+  resources:
+    cpus: 4
+    memory: "6G"
+
+backend: docker
+
+image:
+  dockerfile_dir: "docker"
+  tag: "ghrunner/runner:latest"
