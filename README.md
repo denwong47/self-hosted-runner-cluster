@@ -100,13 +100,44 @@ ghrunner watch                # foreground; Ctrl-C to stop
 ghrunner watch --interval 30  # poll more often than the 60s default
 ```
 
-Run this continuously so it survives reboots — templates for both are in
-[`ghrunner/templates/`](ghrunner/templates/):
+For day-to-day use, run it as a service instead:
 
-- **systemd:** copy `ghrunner-watch.service` to `~/.config/systemd/user/`, then
-  `systemctl --user enable --now ghrunner-watch`.
-- **launchd:** copy `com.ghrunner.watch.plist` to `~/Library/LaunchAgents/`, then
-  `launchctl load ~/Library/LaunchAgents/com.ghrunner.watch.plist`.
+```
+ghrunner service install     # launchd agent on macOS, systemd user unit on Linux
+ghrunner service uninstall
+```
+
+`install` generates the service file for this machine and (re)starts it. It runs `watch` with
+the Python `ghrunner` was installed into and gives it a `PATH` that includes wherever `docker` is,
+because launchd and systemd start services with a minimal `PATH`. Re-run it after moving the
+config or reinstalling Docker. Logs go to `~/Library/Logs/ghrunner/watch.log` on macOS and to
+`journalctl --user -u ghrunner-watch` on Linux.
+
+A desync has to last 3 polls (~3 min) in either direction before `watch` acts on it. After a
+reboot, GitHub still lists the runners for the few seconds before Docker has restarted their
+containers, and those registrations are kept.
+
+### Running unattended on a Mac Mini
+
+Runner containers use `restart: unless-stopped`, so Docker brings them back whenever it starts,
+and they reconnect with the registration they already have. The catch is that **Docker Desktop,
+and the `ghrunner watch` agent, only start when a user logs in**. For the fleet to come back
+after a reboot without anyone at the machine:
+
+1. **Log in automatically:** System Settings → Users & Groups → *Automatically log in as* the
+   account that runs the fleet. macOS doesn't offer this while **FileVault** is on, so you have
+   to choose between disk encryption and unattended reboots. With FileVault on, someone has to
+   log in after every reboot before runners come back.
+2. **Start Docker at login:** Docker Desktop → Settings → General → *Start Docker Desktop when you
+   sign in to your computer*.
+3. **Never sleep:** System Settings → Energy → *Prevent automatic sleeping when the display is
+   off*. A sleeping Mac takes its runners offline.
+4. **Power back on after a power cut:** System Settings → Energy → *Start up automatically after
+   a power failure*.
+5. **Install the watch service:** `ghrunner service install`.
+
+To check: reboot, and after login `ghrunner status` should show every runner `running` locally
+and `online` on GitHub within a minute or two, with no re-registration in the watch log.
 
 ### Sanity-checking the GitHub App on its own
 
@@ -140,7 +171,8 @@ ghrunner/
   fleet.py         reconciles fleet.count against `docker ps`, shells `docker compose`
   watch.py         desync poll loop (GitHub API vs. local containers)
   init_config.py   `ghrunner init`'s questions + rendering them into ghrunner.yaml
-  templates/       config.yaml.tmpl, systemd unit, launchd plist
+  service.py       generates + installs the launchd agent / systemd unit for `watch`
+  templates/       config.yaml.tmpl
 docker/            runner image: Dockerfile + start.sh (registers/deregisters via config.sh)
 tests/
 ```

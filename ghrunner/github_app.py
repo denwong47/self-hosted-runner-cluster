@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Literal, cast
 
 import jwt
 import requests
@@ -23,7 +24,7 @@ JWT_TTL_SECONDS = 9 * 60
 class RunnerInfo:
     id: int
     name: str
-    status: str  # "online" | "offline"
+    status: Literal["online", "offline"]
     busy: bool
 
 
@@ -34,6 +35,12 @@ class GithubApp:
     private key once and re-derives an installation token on demand -- there
     is no long-lived caching across CLI invocations, by design (§3).
     """
+
+    _config: Config
+    _private_key_pem: str | None
+    _installation_id: int | None
+    _installation_token: str | None
+    _installation_token_expires_at: float
 
     def __init__(self, config: Config):
         self._config = config
@@ -118,7 +125,10 @@ class GithubApp:
             body = resp.json()
             for r in body.get("runners", []):
                 runners[r["name"]] = RunnerInfo(
-                    id=r["id"], name=r["name"], status=r["status"], busy=r["busy"]
+                    id=r["id"],
+                    name=r["name"],
+                    status=cast(Literal["online", "offline"], r["status"]),
+                    busy=r["busy"],
                 )
             url = resp.links.get("next", {}).get("url")
             params = None

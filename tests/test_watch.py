@@ -35,22 +35,46 @@ def test_heals_local_running_but_gh_offline_after_threshold(config, fleet_mod):
 
     counts: dict[str, int] = {}
     for _ in range(3):
-        watch._poll_once(config, github_app, counts, offline_threshold=3)
+        watch._poll_once(config, github_app, counts, 3, {})
 
     fleet_mod.force_recreate_runner.assert_called_once_with(
         config, github_app, "runner-01"
     )
 
 
-def test_deregisters_stale_github_entry_with_no_local_container(config, fleet_mod):
+def test_deregisters_stale_github_entry_after_threshold(config, fleet_mod):
     github_app = MagicMock()
     github_app.list_runners.return_value = {
-        "runner-02": RunnerInfo(id=2, name="runner-02", status="online", busy=False)
+        "runner-02": RunnerInfo(id=2, name="runner-02", status="offline", busy=False)
     }
+    missing: dict[str, int] = {}
 
-    watch._poll_once(config, github_app, {}, offline_threshold=3)
+    for _ in range(2):
+        watch._poll_once(config, github_app, {}, 3, missing)
+    github_app.deregister_runner.assert_not_called()
 
+    watch._poll_once(config, github_app, {}, 3, missing)
     github_app.deregister_runner.assert_called_once_with(2)
+
+
+def test_keeps_registration_of_container_restarting_after_reboot(config, fleet_mod):
+    github_app = MagicMock()
+    github_app.list_runners.return_value = {
+        "runner-01": RunnerInfo(id=1, name="runner-01", status="offline", busy=False)
+    }
+    missing: dict[str, int] = {}
+
+    # Docker is up but hasn't restarted the container yet...
+    watch._poll_once(config, github_app, {}, 3, missing)
+    # ...then it has, and the runner reconnects.
+    fleet_mod.list_running.return_value = {"runner-01"}
+    github_app.list_runners.return_value["runner-01"].status = "online"
+    for _ in range(3):
+        watch._poll_once(config, github_app, {}, 3, missing)
+
+    github_app.deregister_runner.assert_not_called()
+    fleet_mod.force_recreate_runner.assert_not_called()
+    assert missing == {}
 
 
 def test_ignores_runners_outside_this_fleet(config, fleet_mod):
@@ -64,7 +88,7 @@ def test_ignores_runners_outside_this_fleet(config, fleet_mod):
         ),
     }
 
-    watch._poll_once(config, github_app, {}, offline_threshold=1)
+    watch._poll_once(config, github_app, {}, 1, {})
 
     github_app.deregister_runner.assert_not_called()
     fleet_mod.force_recreate_runner.assert_not_called()

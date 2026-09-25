@@ -45,6 +45,8 @@ ghrunner/
     compose.py                      # renders runner-NN.yml from runner-template.yml via `extends`
     fleet.py                        # reconciles desired count -> actual compose services
     watch.py                        # GitHub registration desync poll loop (see §5)
+    init_config.py                  # `ghrunner init` questions + config rendering (§2)
+    service.py                      # generates/installs the launchd agent / systemd unit (§6)
     templates/
       config.yaml.tmpl
   docker/                            # existing Dockerfile + start.sh, reused as-is
@@ -194,8 +196,10 @@ without `ghrunner down` deregistering it.
    - Local running + GitHub `offline` for **N consecutive polls** (default 3, i.e. ~3 min) →
      desync. Heal by minting a fresh registration token and
      `docker compose up -d --force-recreate` for that one runner.
-   - GitHub has a name with no matching local container → stale registration; deregister it via
-     the GitHub API directly (no container to restart).
+   - GitHub has a name with no matching local container for **N consecutive polls** → stale
+     registration; deregister it via the GitHub API directly (no container to restart). The
+     threshold matters after a reboot: GitHub still lists the runners for the few seconds before
+     Docker has restarted their containers, and those registrations must survive.
    - Local container running + no matching GitHub entry at all → treat like the first case
      (force-recreate with a fresh token).
 4. Log every heal action (name, reason, timestamp) — this is the audit trail for "was my fleet
@@ -215,9 +219,11 @@ containers per `restart: unless-stopped`, and `HEALTHCHECK` already marks them u
   App (`DELETE .../actions/runners/{id}`). `start.sh` can't do this itself: `config.sh remove` needs
   a removal token, not the registration token it was started with. If the delete fails (e.g. the
   runner is still marked busy), `watch` removes the stale registration on a later poll.
-- Run `ghrunner watch` under whatever service manager the host already uses (systemd unit /
-  launchd plist / cron @reboot — a template for each ships in `templates/`) so it survives
-  reboots. This is the one piece of "supervision" `ghrunner` still owns, since it's
+- Run `ghrunner watch` under the host's service manager so it survives reboots: `ghrunner service
+  install` generates a launchd agent (macOS) or systemd user unit (Linux) with this host's
+  interpreter path and a `PATH` that includes the `docker` CLI, since service managers start with
+  a minimal one. Both start at *login*, as Docker Desktop does, so an unattended Mac Mini needs
+  automatic login (incompatible with FileVault) to recover from a reboot. This is the one piece of "supervision" `ghrunner` still owns, since it's
   GitHub-registration-specific and Compose has no visibility into it.
 
 ## 7. CLI surface
@@ -231,6 +237,7 @@ ghrunner status                    # local docker compose ps + GitHub registrati
 ghrunner logs <name> [--follow]    # docker compose logs
 ghrunner scale <N>                 # shorthand for `up --count N`
 ghrunner watch                     # foreground/service-manager desync poll loop (§5)
+ghrunner service install|uninstall # run `watch` as a launchd agent / systemd user unit (§6)
 ghrunner token test                # mint one registration token, print masked, confirm the App works
 ```
 
@@ -244,7 +251,7 @@ nothing left to probe until that backend is revisited.)
    manual `.env` + single-instance compose workflow with a fleet of N.
 2. **`watch.py` desync poll loop + service-manager persistence.** GitHub-runners-API vs.
    local-compose-ps diff and heal, per §5.
-3. **Packaging.** `pyproject.toml`, pipx-installable, systemd unit + launchd plist templates, README rewrite.
+3. **Packaging.** `pyproject.toml`, pipx-installable, `ghrunner service install` (launchd/systemd), README rewrite.
 
 Apple Container is not on this roadmap for now; if job requirements change (e.g. a future job
 needs `container`'s stronger per-VM isolation), revisit §5 and reintroduce a `ContainerBackend`

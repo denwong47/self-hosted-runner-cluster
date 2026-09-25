@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 from pathlib import Path
 
 import typer
 
-from ghrunner import fleet, init_config, secrets, watch
+from ghrunner import fleet, init_config, secrets, service, watch
 from ghrunner.config import DEFAULT_CONFIG_PATH, Config
 from ghrunner.github_app import GithubApp
 
@@ -209,8 +210,6 @@ def logs(
     follow: bool = typer.Option(False, "--follow", "-f"),
 ):
     """docker logs for one runner."""
-    import subprocess
-
     cmd = ["docker", "logs", name]
     if follow:
         cmd.append("--follow")
@@ -229,6 +228,35 @@ def watch_cmd(
 
 
 app.command(name="watch")(watch_cmd)
+
+service_app = typer.Typer(no_args_is_help=True)
+app.add_typer(service_app, name="service")
+
+
+@service_app.command("install")
+def service_install(path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--path")):
+    """Run `ghrunner watch` as a login service (launchd on macOS, systemd on Linux)."""
+    _load_config(path)
+    try:
+        lines = service.install(path.expanduser().resolve())
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        typer.secho(f"service install failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    for line in lines:
+        typer.echo(line)
+
+
+@service_app.command("uninstall")
+def service_uninstall():
+    """Stop and remove the `ghrunner watch` service."""
+    try:
+        lines = service.uninstall()
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        typer.secho(f"service uninstall failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    for line in lines:
+        typer.echo(line)
+
 
 token_app = typer.Typer(no_args_is_help=True)
 app.add_typer(token_app, name="token")
