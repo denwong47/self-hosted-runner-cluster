@@ -1,0 +1,29 @@
+# Written by `ghrunner init`. Edit freely; `ghrunner config validate` checks it.
+
+github_app:
+  app_id: $app_id
+  # Installed by `ghrunner init`; must stay mode 0600.
+  private_key_path: $private_key_path
+
+# <owner>/<repo> the fleet registers against.
+repo: $repo
+
+fleet:
+  count: $count
+  # Runners are named <prefix>-01, <prefix>-02, ...
+  name_prefix: $name_prefix
+  labels: $labels
+  work_dir: "_work"
+  # true: deregister after every job.
+  ephemeral: false
+  disable_auto_update: false
+  # Per-runner container limits.
+  resources:
+    cpus: $cpus
+    memory: $memory
+
+backend: docker
+
+image:
+  dockerfile_dir: $dockerfile_dir
+  tag: $image_tag

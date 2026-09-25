@@ -44,7 +44,7 @@ class GithubApp:
 
     def _build_jwt(self) -> str:
         if self._private_key_pem is None:
-            self._private_key_pem = secrets.fetch_private_key_pem(
+            self._private_key_pem = secrets.read_private_key_pem(
                 self._config.github_app
             )
         now = int(time.time())

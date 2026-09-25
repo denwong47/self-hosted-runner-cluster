@@ -24,10 +24,13 @@ Scope decisions already made:
   fleet invoke `docker` themselves, so the Docker-socket/DinD risk that motivated evaluating Apple
   Container doesn't apply. Compose's native `restart:` and `HEALTHCHECK` are preferred over
   reimplementing that logic in Python — see §5.
-- Registration tokens are minted **host-side only**. `github_app.py` and `secrets.py` (AWS
-  creds/PEM) never run inside a runner container; the container only ever receives the final,
+- Registration tokens are minted **host-side only**. `github_app.py` and `secrets.py` (the PEM)
+  never run inside a runner container; the container only ever receives the final,
   short-lived `REG_TOKEN` as an env var, matching the existing `start.sh` contract. This keeps the
-  GitHub App private key and AWS creds off of every container's attack surface.
+  GitHub App private key off of every container's attack surface.
+- **No cloud provider.** The private key is a local `0600` file installed by `ghrunner init`. The
+  host is a single private Mac Mini, so an S3/SSM fetch would just swap one on-disk secret (the
+  PEM) for another (AWS creds) while adding a network dependency and an AWS account to manage.
 
 ## 1. Package layout
 
@@ -38,37 +41,34 @@ ghrunner/
     cli.py                          # Typer app, subcommands
     config.py                       # Pydantic models + YAML loader/validator
     github_app.py                  # JWT signing, installation token, registration-token fetch
-    secrets.py                      # SSM param + S3 PEM fetch (boto3), kept in memory only
+    secrets.py                      # install/read the local PEM file, 0600 enforced
     compose.py                      # renders runner-NN.yml from runner-template.yml via `extends`
     fleet.py                        # reconciles desired count -> actual compose services
     watch.py                        # GitHub registration desync poll loop (see §5)
     templates/
-      config.sample.yaml
+      config.yaml.tmpl
   docker/                            # existing Dockerfile + start.sh, reused as-is
 tests/
 ```
 
-Stack: **Typer** (CLI), **Pydantic** (config validation), **boto3** (SSM + S3), **PyJWT** +
+Stack: **Typer** (CLI), **Pydantic** (config validation), **PyJWT** +
 **cryptography** (GitHub App JWT signing), **PyYAML** (compose file rendering). Installable with
 `pipx install .` / `uv tool install .`.
 
 ## 2. Config file
 
-`ghrunner.yaml`, with `ghrunner.sample.yaml` checked into the repo for new users. `ghrunner init`
-copies the sample to the real path (default `~/.config/ghrunner/ghrunner.yaml`) and refuses to
-overwrite an existing one.
+`ghrunner.yaml`, written by `ghrunner init`, which asks for every value below (each also
+available as a flag, e.g. `--repo`, for scripted setup) and re-asks on invalid input. Once all
+answers are in, it copies the downloaded GitHub App `.pem` next to the config as `github-app.pem`
+with mode `0600` and renders `templates/config.yaml.tmpl` to the real path (default
+`~/.config/ghrunner/ghrunner.yaml`). It refuses to overwrite an existing config.
+`image.dockerfile_dir` is stored absolute so the service-managed `watch` doesn't depend on its
+working directory.
 
 ```yaml
 github_app:
   app_id: "123456"
-  client_id: "Iv1.abc123"               # kept for completeness / future OAuth flows; not required
-                                          # for the registration-token flow itself (that only needs
-                                          # app_id + the private key — see §3)
-  client_secret_ssm_param: "/ghrunner/github-app/client-secret"   # SecureString in AWS SSM
-  private_key_s3:
-    bucket: "my-org-secrets"
-    key: "github-app/ghrunner.pem"
-  aws_region: "us-east-1"
+  private_key_path: "~/.config/ghrunner/github-app.pem"   # installed by `ghrunner init`, 0600
 
 repo: "my-org/my-repo"
 
@@ -98,9 +98,8 @@ like `count >= 1`), and exposes a `Config.load(path)` used by every CLI command.
 Per the discussion in github/community#27204, replacing manual `REG_TOKEN` copy-paste. This entire
 chain runs **on the host** (never inside a container):
 
-1. `secrets.py` fetches the PEM from S3 (`GetObject`) straight into memory — never written to disk
-   except as a `tempfile.NamedTemporaryFile(mode=0o600)` if the JWT library requires a file path,
-   deleted immediately after signing.
+1. `secrets.py` reads the PEM from `github_app.private_key_path`, refusing it if the file is
+   group/world-accessible (anything looser than `0600`).
 2. `github_app.py` builds a JWT (`iss=app_id`, `iat`/`exp` ~9 min window) signed with that key.
 3. `GET /app/installations` (Bearer: JWT) → find the installation for the target repo/org.
 4. `POST /app/installations/{id}/access_tokens` → short-lived **installation access token**.
@@ -108,13 +107,12 @@ chain runs **on the host** (never inside a container):
    the actual runner registration token (1-hour TTL, single-use for `config.sh`).
 
 Each `ghrunner up` invocation mints one registration token per runner it needs to (re)register, and
-passes it into that runner's compose file as `REG_TOKEN` (§4). AWS credentials and the GitHub App
-private key are only ever touched by the host process — no secrets material is mounted into or
-installed inside runner containers.
+passes it into that runner's compose file as `REG_TOKEN` (§4). The GitHub App private key is only
+ever touched by the host process — no secrets material is mounted into or installed inside runner
+containers.
 
-Note: `client_secret` isn't actually needed for this flow (App auth uses JWT + private key, not
-the OAuth client secret). It's kept in the config schema since it's already provisioned, in case a
-future feature needs user-to-server OAuth — `github_app.py` just won't touch it yet.
+Only `app_id` + the private key are needed; the App's OAuth `client_id`/`client_secret` play no part
+in this flow and aren't in the config.
 
 ## 4. Compose rendering (`compose.py`) — Docker owns restart/health
 
@@ -154,7 +152,7 @@ services:
       NAME: runner-03
       REPO: my-org/my-repo
       LABELS: self-hosted,linux,arm64
-      REG_TOKEN: ${REG_TOKEN}          # host injects this at `up` time, never written to disk
+      REG_TOKEN: <minted>              # written at `up` time; file is 0600, token single-use
       EPHEMERAL: "false"
 ```
 
@@ -180,8 +178,11 @@ Apple's `container` CLI was evaluated as the primary backend, but two things cha
 So the backend is Docker + Compose (§4), and `watch.py`'s scope shrinks to the one thing Compose
 *can't* see: whether GitHub's registration state has silently diverged from what's running
 locally. That can happen if, e.g., a runner is removed from GitHub's side (admin action, org
-policy, idle cleanup) while its container is still up and polling, or a container dies in a way
-`start.sh`'s deregister trap doesn't catch.
+policy, idle cleanup) while its container is still up and polling, or a container goes away
+without `ghrunner down` deregistering it.
+
+`watch.py` only considers runners named `<name_prefix>-NN`. Anything else registered to the repo
+(other hosts, other prefixes) is never recreated or deregistered.
 
 `watch.py` poll loop (default 60s):
 
@@ -210,8 +211,10 @@ containers per `restart: unless-stopped`, and `HEALTHCHECK` already marks them u
 - Diff against `docker compose ps` (or `docker ps --filter name=<prefix>`) for the name prefix.
 - For each missing name: mint a fresh registration token (§3), render its compose file (§4),
   `docker compose up -d`.
-- For extras beyond `count`: `docker compose down` and let `start.sh`'s existing trap deregister
-  from GitHub.
+- For extras beyond `count`: `docker compose down`, then deregister from GitHub host-side via the
+  App (`DELETE .../actions/runners/{id}`). `start.sh` can't do this itself: `config.sh remove` needs
+  a removal token, not the registration token it was started with. If the delete fails (e.g. the
+  runner is still marked busy), `watch` removes the stale registration on a later poll.
 - Run `ghrunner watch` under whatever service manager the host already uses (systemd unit /
   launchd plist / cron @reboot — a template for each ships in `templates/`) so it survives
   reboots. This is the one piece of "supervision" `ghrunner` still owns, since it's
@@ -220,8 +223,8 @@ containers per `restart: unless-stopped`, and `HEALTHCHECK` already marks them u
 ## 7. CLI surface
 
 ```
-ghrunner init                      # copy ghrunner.sample.yaml -> config path
-ghrunner config validate           # schema check + AWS creds check + GitHub App auth dry-run
+ghrunner init [--<setting> ...]    # ask for every setting, install the App .pem (0600), write config
+ghrunner config validate           # schema check + private key check + GitHub App auth dry-run
 ghrunner up [--count N]            # build image if needed, render compose files, reconcile fleet
 ghrunner down [--all | --name X]   # docker compose down one or all runners, deregister
 ghrunner status                    # local docker compose ps + GitHub registration state, side by side

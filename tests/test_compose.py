@@ -11,7 +11,7 @@ def make_config(tmp_path):
         {
             "github_app": {
                 "app_id": "1",
-                "private_key_s3": {"bucket": "b", "key": "k"},
+                "private_key_path": str(tmp_path / "github-app.pem"),
             },
             "repo": "my-org/my-repo",
             "fleet": {"count": 2, "name_prefix": "runner", "labels": ["self-hosted"]},

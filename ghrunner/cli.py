@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import sys
-from importlib import resources
 from pathlib import Path
 
 import typer
 
-from ghrunner import fleet, watch
+from ghrunner import fleet, init_config, secrets, watch
 from ghrunner.config import DEFAULT_CONFIG_PATH, Config
 from ghrunner.github_app import GithubApp
+
+PRIVATE_KEY_FILENAME = "github-app.pem"
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 config_app = typer.Typer(no_args_is_help=True)
@@ -31,26 +31,103 @@ def _load_config(path: Path) -> Config:
         raise typer.Exit(1)
 
 
+def _answer(question: init_config.Question, flag_value: str | None):
+    """A flag value is validated once and rejected outright; otherwise prompt,
+    re-asking until the answer parses.
+    """
+    if flag_value is not None:
+        try:
+            return question.parse(flag_value)
+        except ValueError as exc:
+            flag = "--" + question.key.replace("_", "-")
+            typer.secho(f"{flag}: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+    while True:
+        raw = typer.prompt(question.prompt, default=question.default())
+        try:
+            return question.parse(raw)
+        except ValueError as exc:
+            typer.secho(f"  {exc}", fg=typer.colors.RED, err=True)
+
+
+def _flag(help: str) -> typer.models.OptionInfo:
+    return typer.Option(None, help=f"{help} (prompted for if omitted)")
+
+
 @app.command()
 def init(
     path: Path = typer.Option(
         DEFAULT_CONFIG_PATH, "--path", help="Where to write ghrunner.yaml"
     ),
+    app_id: str | None = _flag("GitHub App ID or Client ID"),
+    pem: str | None = _flag("GitHub App private key (.pem) to install"),
+    repo: str | None = _flag("<owner>/<repo> to register runners against"),
+    count: str | None = _flag("Number of runners"),
+    name_prefix: str | None = _flag("Runner name prefix"),
+    labels: str | None = _flag("Comma-separated runner labels"),
+    cpus: str | None = _flag("CPUs per runner"),
+    memory: str | None = _flag("Memory per runner, e.g. 6G"),
+    dockerfile_dir: str | None = _flag("Runner image build directory"),
+    image_tag: str | None = _flag("Runner image tag"),
 ):
-    """Copy ghrunner.sample.yaml -> config path. Refuses to overwrite."""
+    """Write ghrunner.yaml, asking for each value, and install the App's private key.
+
+    The key is copied next to the config as github-app.pem with mode 0600.
+    Nothing is written until every answer is in. Refuses to overwrite an
+    existing config.
+    """
     path = path.expanduser()
     if path.exists():
         typer.secho(f"{path} already exists, not overwriting", fg=typer.colors.YELLOW)
         raise typer.Exit(1)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    sample = resources.files("ghrunner.templates").joinpath("config.sample.yaml")
-    shutil.copyfile(str(sample), str(path))
-    typer.echo(f"wrote {path} -- edit it, then run `ghrunner config validate`")
+
+    flags = {
+        "app_id": app_id,
+        "pem": pem,
+        "repo": repo,
+        "count": count,
+        "name_prefix": name_prefix,
+        "labels": labels,
+        "cpus": cpus,
+        "memory": memory,
+        "dockerfile_dir": dockerfile_dir,
+        "image_tag": image_tag,
+    }
+    # Check every flag before prompting, so a bad one fails fast.
+    answers = {
+        q.key: _answer(q, flags[q.key])
+        for q in init_config.QUESTIONS
+        if flags[q.key] is not None
+    }
+    for q in init_config.QUESTIONS:
+        if q.key not in answers:
+            answers[q.key] = _answer(q, None)
+
+    pem_path = answers["pem"]
+    key_dest = path.parent / PRIVATE_KEY_FILENAME
+    same_file = key_dest.exists() and key_dest.resolve() == pem_path.resolve()
+    if key_dest.exists() and not same_file:
+        typer.confirm(f"{key_dest} already exists, overwrite it?", abort=True)
+    text = init_config.render(answers, key_dest)
+    try:
+        secrets.install_private_key(pem_path, key_dest)
+    except (OSError, ValueError) as exc:
+        typer.secho(f"can't install {pem_path}: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    path.write_text(text)
+
+    typer.echo(f"installed private key at {key_dest} (mode 0600)")
+    if not same_file:
+        typer.echo(
+            f"  the original at {pem_path} is no longer needed and can be deleted"
+        )
+    typer.echo(f"wrote {path}")
+    typer.echo("next: `ghrunner config validate`, then `ghrunner up`")
 
 
 @config_app.command("validate")
 def config_validate(path: Path = typer.Option(DEFAULT_CONFIG_PATH, "--path")):
-    """Schema check + AWS creds check + GitHub App auth dry-run."""
+    """Schema check + private key check + GitHub App auth dry-run."""
     config = _load_config(path)
     typer.echo(
         f"config OK: {config.fleet.count} runners, prefix={config.fleet.name_prefix!r}, repo={config.repo}"
@@ -90,12 +167,12 @@ def down(
     ),
     name: str | None = typer.Option(None, "--name", help="Stop just this one runner"),
 ):
-    """Stop + deregister one or all runners."""
+    """Stop + deregister (host-side, via the GitHub App) one or all runners."""
     config = _load_config(path)
     if not all and not name:
         typer.secho("pass --all or --name <runner>", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
-    fleet.down(config, name=name)
+    fleet.down(config, GithubApp(config), name=name)
     typer.echo("done")
 
 

@@ -41,7 +41,13 @@ def _poll_once(
     offline_counts: dict[str, int],
     offline_threshold: int,
 ) -> None:
-    gh_runners = github_app.list_runners()
+    # Only this fleet's runners -- anything else registered to the repo (other
+    # hosts, other prefixes) is left alone.
+    gh_runners = {
+        name: info
+        for name, info in github_app.list_runners().items()
+        if config.owns_runner(name)
+    }
     local = fleet.list_running(config)
 
     for name, info in gh_runners.items():

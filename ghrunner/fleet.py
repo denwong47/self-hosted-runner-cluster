@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import subprocess
 
+import requests
+
 from ghrunner import compose
 from ghrunner.config import Config
 from ghrunner.github_app import GithubApp
@@ -25,8 +27,10 @@ def list_running(config: Config) -> set[str]:
         text=True,
         check=True,
     )
+    # Docker's name filter is a regex prefix match, so `runner-gpu-01` would
+    # match prefix `runner`; narrow to exactly `<prefix>-NN`.
     names = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    return names
+    return {name for name in names if config.owns_runner(name)}
 
 
 def start_runner(
@@ -51,7 +55,7 @@ def start_runner(
     subprocess.run(cmd, check=True)
 
 
-def stop_runner(config: Config, name: str) -> None:
+def stop_runner(config: Config, github_app: GithubApp, name: str) -> None:
     compose_file = compose.runner_compose_path(config, name)
     log.info("stopping runner %s", name)
     if compose_file.exists():
@@ -64,6 +68,25 @@ def stop_runner(config: Config, name: str) -> None:
         # Compose file already gone (e.g. rendered by a prior CLI version/run) --
         # fall back to removing the container directly so `down` still works.
         subprocess.run(["docker", "rm", "-f", name], check=False)
+    _deregister(github_app, name)
+
+
+def _deregister(github_app: GithubApp, name: str) -> None:
+    """Removes the runner's GitHub registration from the host side. The
+    container can't do this itself on shutdown: `config.sh remove` needs a
+    removal token, which only the host (holding the App key) can mint.
+    """
+    info = github_app.list_runners().get(name)
+    if info is None:
+        return
+    try:
+        github_app.deregister_runner(info.id)
+        log.info("deregistered runner %s from GitHub", name)
+    except requests.HTTPError as exc:
+        # e.g. still marked busy; `ghrunner watch` retries once it's offline.
+        log.warning(
+            "couldn't deregister %s from GitHub (%s), leaving it to watch", name, exc
+        )
 
 
 def force_recreate_runner(config: Config, github_app: GithubApp, name: str) -> None:
@@ -79,12 +102,12 @@ def up(config: Config, github_app: GithubApp) -> None:
     for name in sorted(desired - running):
         start_runner(config, github_app, name)
     for name in sorted(running - desired):
-        stop_runner(config, name)
+        stop_runner(config, github_app, name)
 
 
-def down(config: Config, name: str | None = None) -> None:
+def down(config: Config, github_app: GithubApp, name: str | None = None) -> None:
     if name is not None:
-        stop_runner(config, name)
+        stop_runner(config, github_app, name)
         return
     for existing in sorted(list_running(config)):
-        stop_runner(config, existing)
+        stop_runner(config, github_app, existing)

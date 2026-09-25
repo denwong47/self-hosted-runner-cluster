@@ -5,7 +5,7 @@ from ghrunner.config import Config
 RAW = {
     "github_app": {
         "app_id": "123456",
-        "private_key_s3": {"bucket": "b", "key": "k"},
+        "private_key_path": "/nonexistent/github-app.pem",
     },
     "repo": "my-org/my-repo",
     "fleet": {"count": 3, "name_prefix": "runner", "labels": ["self-hosted", "linux"]},
@@ -31,3 +31,12 @@ def test_rejects_zero_count():
     bad = {**RAW, "fleet": {**RAW["fleet"], "count": 0}}
     with pytest.raises(ValueError):
         Config.model_validate(bad)
+
+
+def test_owns_runner_matches_only_this_fleet():
+    config = Config.model_validate(RAW)
+    assert config.owns_runner("runner-01")
+    assert config.owns_runner("runner-120")
+    assert not config.owns_runner("runner-gpu-01")
+    assert not config.owns_runner("other-01")
+    assert not config.owns_runner("runner-")

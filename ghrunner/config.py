@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -9,20 +10,13 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_PATH = Path("~/.config/ghrunner/ghrunner.yaml").expanduser()
+DEFAULT_PRIVATE_KEY_PATH = Path("~/.config/ghrunner/github-app.pem").expanduser()
 DEFAULT_COMPOSE_WORK_DIR = Path("~/.local/state/ghrunner/compose").expanduser()
-
-
-class PrivateKeyS3(BaseModel):
-    bucket: str
-    key: str
 
 
 class GithubAppConfig(BaseModel):
     app_id: str
-    client_id: str | None = None
-    client_secret_ssm_param: str | None = None
-    private_key_s3: PrivateKeyS3
-    aws_region: str = "us-east-1"
+    private_key_path: str = str(DEFAULT_PRIVATE_KEY_PATH)
 
 
 class Resources(BaseModel):
@@ -67,6 +61,15 @@ class Config(BaseModel):
     @property
     def repo_name(self) -> str:
         return self.repo.split("/", 1)[1]
+
+    def owns_runner(self, name: str) -> bool:
+        """True if `name` is one of this fleet's runners (`<prefix>-NN`), at any
+        count. Other runners registered to the same repo -- other hosts, other
+        prefixes -- are never ours to recreate or deregister.
+        """
+        return (
+            re.fullmatch(rf"{re.escape(self.fleet.name_prefix)}-\d+", name) is not None
+        )
 
     def runner_names(self) -> list[str]:
         return [
