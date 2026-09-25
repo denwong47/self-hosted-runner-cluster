@@ -1,10 +1,12 @@
 # `ghrunner`
 
 > [!WARNING]
-> This is currently complete AI Slop.
+> This is basically complete AI Slop.
 >
-> I am waiting for a fresh Mac Mini M6 to test this setup, have no expectation whatsoever
-> on this setup until I have tested it on the new hardware.
+> It works on a Mac Mini M6, but I haven't really spent enough time scrutinizing the code
+> to be completely confident of it.
+>
+> **Use at your own risk.**
 
 A CLI that manages a fleet of self-hosted GitHub Actions runners as Docker Compose services,
 with registration tokens minted on the fly from a GitHub App instead of pasted by hand.
